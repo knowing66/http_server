@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/home/shiyang/http_server/build",
+  "command": "/usr/bin/c++   -g -Wall -Wextra -Werror=return-type -o CMakeFiles/server.dir/server.cpp.o -c /home/shiyang/http_server/server.cpp",
+  "file": "/home/shiyang/http_server/server.cpp"
+}
+]

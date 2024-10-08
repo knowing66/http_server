@@ -1,0 +1,3 @@
+/home/shiyang/http_server/build/CMakeFiles/server.dir
+/home/shiyang/http_server/build/CMakeFiles/edit_cache.dir
+/home/shiyang/http_server/build/CMakeFiles/rebuild_cache.dir
