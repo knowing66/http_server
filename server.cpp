@@ -109,17 +109,21 @@ using StringMap = std::map<std::string,std::string>;
 struct http11_header_parser{
     std::string m_header;
     std::string m_body;
+    std::string m_headline; //GET / HTTP/1.1
     StringMap m_header_keys;
     //size_t content_length = 0;
     bool m_header_finished = false;
-    bool m_body_finished = false;
+    //bool m_body_finished = false;
 
-    [[nodiscard]] bool need_more_chunks(){
-        return !m_body_finished;
+    [[nodiscard]] bool header_parser_finished () {
+        return m_header_finished;
     }
-
+    
+    //构建StringMap m_header_keys;
+    //假装是私有函数
     void _exract_headers () {
         size_t pos = m_header.find("\r\n");
+        m_headline = m_header.substr(0,pos);
         while( pos != m_header.npos){
             pos += 2;
             size_t nxt_pos = m_header.find("\r\n",pos);
@@ -132,7 +136,7 @@ struct http11_header_parser{
             size_t col_pos = line.find(":");
             if( col_pos != line.npos ){
                 std::string key = line.substr(0, col_pos);
-                std::string value = line.substr(col_pos);
+                std::string value = line.substr(col_pos + 2);
                 std::transform( key.begin(), key.end(), key.begin(), [](char c){
                     if('A' <= c && c <= 'Z'){
                         c += 'a'-'A';
@@ -152,10 +156,10 @@ struct http11_header_parser{
             size_t m_header_len = m_header.find("\r\n\r\n");
             if(m_header_len != std::string::npos){
                 m_header_finished = true;
-                m_body = m_header.substr(m_header_len + 4);
+                m_body = m_header.substr(m_header_len + 4); //多余的body存入m_body中
                 m_header.resize(m_header_len);
 
-                _exract_headers();
+                _exract_headers();//构建StringMap m_header_keys;
             }
         }else{
             m_body.append(chunk);
@@ -166,19 +170,72 @@ struct http11_header_parser{
         return m_header_keys;
     }
 
-    std::string &extra_body () {
+    std::string &extra_body () { //解析头部过程中可能会带着一些多的body进来
         return m_body;
     }
 
     std::string &header_raw () {
         return m_header;
     }
-    
+
+    std::string &headline (){
+        return m_headline;
+    }
 };
 
 template <class HeaderParser = http11_header_parser>
 struct http_request_parser {
+    HeaderParser m_header_parser;
+    size_t m_content_length = 0;
+    bool m_body_finished = false;
 
+    [[nodiscard]] bool request_finished () {
+        return m_body_finished;
+    }
+
+    size_t _extract_content_length () {
+        auto &headers = m_header_parser.headers();
+        auto it = headers.find("content-length");
+        if( it == headers.end() ){
+            return 0;
+        }
+
+        try{
+            return std::stoi( it->second );
+        } catch (std::invalid_argument const&){
+            return 0;
+        }
+
+    }
+
+    void push_chunks (std::string_view chunk) {
+        if( !m_header_parser.header_parser_finished() ){
+            m_header_parser.push_chunk(chunk);
+            if( m_header_parser.header_parser_finished() ){
+                m_content_length = _extract_content_length();
+                std::string &body = m_header_parser.extra_body();
+                if(body.size() >= m_content_length){
+                    m_body_finished = true;
+                    body.resize(m_content_length);
+                }
+            }
+        }else{
+            std::string &body = m_header_parser.extra_body();
+            body.append(chunk);
+            if(body.size() >= m_content_length){
+                m_body_finished = true;
+                body.resize(m_content_length);
+            }
+        }
+    }
+
+    std::string &body(){
+        return m_header_parser.extra_body();
+    }
+
+    std::string &headers_raw(){
+        return m_header_parser.header_raw();
+    }
 };
 
 std::vector<std::thread> pool;
@@ -187,8 +244,8 @@ int main() {
     //setlocale(LC_ALL,"zh_CN.UTF-8");
 
     address_resolver my_resolver;
-    my_resolver.resolve("127.0.0.1","8080");
-    fmt::println("正在监听 127.0.0.1：8080");
+    my_resolver.resolve("127.0.0.1","9080");
+    fmt::println("正在监听 127.0.0.1：9080");
     auto first_entry = my_resolver.get_first_entry();
 
     int listenfd = first_entry.creat_and_bind_socket();
@@ -202,14 +259,14 @@ int main() {
             http_request_parser request_parser;
             do{
                 ssize_t n = CHECK_CALL(read, connid, buf, sizeof(buf));
-                request_parser.push_chunk(std::string_view(buf,n));
-            }while ( request_parser.need_more_chunks() );
+                request_parser.push_chunks(std::string_view(buf,n));
+            }while ( !request_parser.request_finished() );
             
-            fmt::println("收到请求:{}",request_parser.m_header);
-            fmt::println("收到请求正文:{}",request_parser.m_body);
+            fmt::println("收到请求:{}",request_parser.headers_raw());
+            fmt::println("收到请求正文:{}",request_parser.body());
 
-            std::string body = request_parser.m_body;
-            std::string res = "HTTP/1.1 200 OK\r\nServer: co_http\r\nConnection: close\r\nContent-length: "+ std::to_string(request_parser.content_length) +"\r\n\r\n" + body;
+            std::string body = request_parser.body();
+            std::string res = "HTTP/1.1 200 OK\r\nServer: co_http\r\nConnection: close\r\nContent-length: "+ std::to_string(request_parser._extract_content_length()) +"\r\n\r\n" + body;
             CHECK_CALL(write,connid,res.data(),res.size());
             fmt::println("我的反馈是:{}", res);
 
