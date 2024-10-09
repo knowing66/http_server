@@ -94,7 +94,7 @@ struct address_resolver{
     address_resolver() = default;   
     
     address_resolver(address_resolver &&that) :m_head(that.m_head){
-        //that.m_head = nullptr;
+        that.m_head = nullptr;
     }
 
     ~address_resolver(){
@@ -170,7 +170,7 @@ struct http11_header_parser{
         return m_header_keys;
     }
 
-    std::string &extra_body () { //解析头部过程中可能会带着一些多的body进来
+    std::string &extra_body () { //解析头部过程中可能会带着一些多的body进来,body的主要解析过程放在struct _http_base_parser中实现
         return m_body;
     }
 
@@ -183,9 +183,9 @@ struct http11_header_parser{
     }
 };
 
-template <class HeaderParser = http11_header_parser>
-struct http_request_parser {
-    HeaderParser m_header_parser;
+template<class HeaderParser = http11_header_parser>
+struct _http_base_parser{
+    http11_header_parser m_header_parser;
     size_t m_content_length = 0;
     bool m_body_finished = false;
 
@@ -236,6 +236,145 @@ struct http_request_parser {
     std::string &headers_raw(){
         return m_header_parser.header_raw();
     }
+
+    std::string headerline_first(){
+        auto &headline = m_header_parser.headline();
+        auto space_pos = headline.find(" ");
+        if( space_pos == std::string::npos ){
+            return "";
+        }
+        return headline.substr(0, space_pos);
+    }
+
+    std::string headerline_second(){
+        auto &headline = m_header_parser.headline();
+        auto space1_pos = headline.find(" ");
+        if( space1_pos == std::string::npos ){
+            return "";
+        }
+        auto space2_pos = headline.find(" ");
+        if( space2_pos == std::string::npos ){
+            return "";
+        }
+        return headline.substr(space1_pos,space2_pos);
+    }
+
+    std::string headerline_third(){
+        auto &headline = m_header_parser.headline();
+        auto space1_pos = headline.find(" ");
+        if( space1_pos == std::string::npos ){
+            return "";
+        }
+        auto space2_pos = headline.find(" ");
+        if( space2_pos == std::string::npos ){
+            return "";
+        }
+        return headline.substr(space2_pos);
+    }
+};
+
+template<class HeaderParser = http11_header_parser>
+struct http_request_parser : _http_base_parser<HeaderParser> {
+    std::string method() {
+        return this->headerline_first();
+    }
+
+    std::string url() {
+        return this->headerline_second();
+    }
+
+    std::string http_version() {
+        return this->headerline_third();
+    }
+};
+
+template<class HeaderParser = http11_header_parser>
+struct http_response_parser : _http_base_parser<HeaderParser> {
+    std::string http_version(){
+        return this->headerline_first();
+    }
+
+    int status(){
+        auto s = this->headerline_second();
+        try{
+            return std::stoi(s);
+        } catch (std::invalid_argument const &e) {
+            return -1;
+        }
+    }
+
+    std::string status_string(){
+        return this->headerline_third();
+    }
+};
+
+struct http11_header_writer{
+    std::string _buffer_to_write;
+
+    void write_first (std::string const& first, std::string const& second,std::string const& third){
+        _buffer_to_write.append(first);
+        _buffer_to_write.append(" ");
+        _buffer_to_write.append(second);
+        _buffer_to_write.append(" ");
+        _buffer_to_write.append(third);
+    }
+
+    void write_middle (std::string_view &key,std::string_view &value){
+        _buffer_to_write.append("\r\n");
+        _buffer_to_write.append(key);
+        _buffer_to_write.append(":");
+        _buffer_to_write.append(value);
+    }
+
+    void write_end() {
+        _buffer_to_write.append("\r\n\r\n");
+    }
+
+    std::string &buffer(){
+        return _buffer_to_write;
+    }
+};
+
+template<class Header_writer = http11_header_writer>
+struct request_writer{
+    Header_writer m_request_writer;
+
+    std::string &buffer(){
+        return m_request_writer.buffer();
+    }
+
+    void begin_header(int status){
+        m_request_writer.write_first("HTTP/1.1",std::to_string(status),"OK");
+    }
+
+    void write_header(std::string_view &key,std::string_view &value){
+        m_request_writer.write_middle(key,value);
+    }
+
+    void end_header(){
+        m_request_writer.write_end();
+    }
+};
+
+template<class Header_writer = http11_header_writer>
+struct response_writer{
+    Header_writer m_response_writer;
+
+    std::string &buffer(){
+        return m_response_writer.buffer();
+    }
+
+    void begin_header(int status){
+        m_response_writer.write_first("HTTP/1.1",std::to_string(status),"OK");
+    }
+
+    void write_header(std::string_view key,std::string_view value){
+        m_response_writer.write_middle(key,value);
+    }
+
+    void end_header(){
+        m_response_writer.write_end();
+    }
 };
 
 std::vector<std::thread> pool;
@@ -253,6 +392,7 @@ int main() {
     while (true) {
         socket_address_storage client_addr;
         int connid = CHECK_CALL(accept, listenfd, &client_addr.m_addr, &client_addr.m_addrlen);
+        fmt::println("接受了一个连接：{}",connid);
         pool.push_back(std::thread ( [connid] {
         
             char buf[1024];            
@@ -261,14 +401,33 @@ int main() {
                 ssize_t n = CHECK_CALL(read, connid, buf, sizeof(buf));
                 request_parser.push_chunks(std::string_view(buf,n));
             }while ( !request_parser.request_finished() );
-            
-            fmt::println("收到请求:{}",request_parser.headers_raw());
-            fmt::println("收到请求正文:{}",request_parser.body());
+            fmt::println("收到请求：{}",connid);
+            // fmt::println("收到请求:{}",request_parser.headers_raw());
+            // fmt::println("收到请求正文:{}",request_parser.body());
+            std::string &body = request_parser.body();
 
-            std::string body = request_parser.body();
-            std::string res = "HTTP/1.1 200 OK\r\nServer: co_http\r\nConnection: close\r\nContent-length: "+ std::to_string(request_parser._extract_content_length()) +"\r\n\r\n" + body;
+            if( body.size() == 0 ){
+                fmt::println("你好，你的请求正文为空");
+            }else{
+                fmt::println("你好，你的请求是：[{}],共{}字节", body, body.size());
+            }
+
+            body = body + "给正文加点料";
+
+            response_writer res_writer;
+            res_writer.begin_header(200);
+            res_writer.write_header("Server","co_http");
+            res_writer.write_header("Content-type","text/html;charset=utf-8");
+            res_writer.write_header("Connection","colse");
+            res_writer.write_header("Content-length",std::to_string(body.size()));
+            res_writer.end_header();
+            auto &res = res_writer.buffer();
+            //std::string res = "HTTP/1.1 200 OK\r\nServer: co_http\r\nConnection: close\r\nContent-length: "+ std::to_string(request_parser._extract_content_length()) +"\r\n\r\n" + body;
             CHECK_CALL(write,connid,res.data(),res.size());
-            fmt::println("我的反馈是:{}", res);
+            CHECK_CALL(write,connid,body.data(),body.size());
+
+            fmt::println("我的响应头:{}", res);
+            fmt::println("我的响应正文:{}", body);
 
             close(connid);
         }));
