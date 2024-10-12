@@ -11,79 +11,95 @@
 #include <algorithm>
 #include <map>
 
-int check_error(const char *msg,int res){
-    if (res == -1) {
+std::error_category &gai_category(){
+    static struct final : std::error_category {
+        const char* name() const noexcept override {
+            return "getaddrinfo";
+        }
+
+        std::string message(int err) const override {
+            return gai_strerror(err);
+        }
+    }instance;
+    return instance;
+}
+
+template<int Expect = 0,class T>
+T check_error(const char *msg, T res){
+    if(res == -1){
+        if noexcept (Expect != 0) {
+            if(errno = Expect){
+                return -1;
+            }
+        }
         fmt::println("{}:{}", msg, std::strerror(errno));
-        throw;
+        auto ec = std::error_code(errno,std::system_category());
+        throw std::system_error(ec, msg);
     }
     return res;
 }
 
-ssize_t check_error(const char *msg,ssize_t res){
-    if (res == -1) {
-        fmt::println("{}:{}", msg, std::strerror(errno));
-        throw;
-    }
-    return res;
-}
-
+#define SOURCE_INFO_IMPL(file,line) "In"file":"#line":"
+#define SOURCE_INFO() SOURCE_INFO_IMPL(__FILE__,__LINE__)
+#define CHECK_CALL_EXCEPT(expect,func,...) check_error<expect>(SOURCE_INFO()#func,__VA_ARGS__)
 #define CHECK_CALL(func, ...) check_error(#func,func(__VA_ARGS__))
 
-struct socket_address_fatptr {
-    struct sockaddr *ai_addr;
-    socklen_t ai_addrlen;
-};
-
-struct socket_address_storage {
-    union 
-    {
-        struct sockaddr m_addr;
-        struct sockaddr_storage m_addr_storage;
-    };
-    socklen_t m_addrlen = sizeof( struct sockaddr_storage );
-
-    operator socket_address_fatptr(){
-        return {&m_addr,m_addrlen};
-    }
-};
-
-struct address_resolved_entry {
-    struct addrinfo *m_curr = nullptr;
-    
-    socket_address_fatptr get_address() const {
-        return {m_curr->ai_addr,m_curr->ai_addrlen};
-    }
-
-    int creatsocket() const {
-        int sockfd = check_error("socket",socket(m_curr->ai_family,m_curr->ai_socktype,m_curr->ai_protocol));
-        return sockfd;
-    }
-
-    int creat_and_bind_socket() const {
-        int sockfd = creatsocket();
-        socket_address_fatptr serve_addr = get_address();
-        
-        CHECK_CALL(bind,sockfd,serve_addr.ai_addr,serve_addr.ai_addrlen);
-        return sockfd;
-    }
-
-    [[nodiscard]] bool next_entry(){
-        struct addrinfo *m_next = m_curr->ai_next;
-        if( m_next == nullptr ){
-            return false;
-        }
-        return true;
-    }   
-};
-
 struct address_resolver{
+    struct socket_address_fatptr {
+        struct sockaddr *ai_addr;
+        socklen_t ai_addrlen;
+    };
+
+    struct socket_address_storage {
+        union 
+        {
+            struct sockaddr m_addr;
+            struct sockaddr_storage m_addr_storage;
+        };
+        socklen_t m_addrlen = sizeof( struct sockaddr_storage );
+
+        operator socket_address_fatptr(){
+            return {&m_addr,m_addrlen};
+        }
+    };
+
+    struct address_resolved_entry {
+        struct addrinfo *m_curr = nullptr;
+        
+        socket_address_fatptr get_address() const {
+            return {m_curr->ai_addr,m_curr->ai_addrlen};
+        }
+
+        int creatsocket() const {
+            int sockfd = check_error("socket",socket(m_curr->ai_family,m_curr->ai_socktype,m_curr->ai_protocol));
+            return sockfd;
+        }
+
+        int creat_and_bind_socket() const {
+            int sockfd = creatsocket();
+            socket_address_fatptr serve_addr = get_address();
+            
+            CHECK_CALL(bind,sockfd,serve_addr.ai_addr,serve_addr.ai_addrlen);
+            return sockfd;
+        }
+
+        [[nodiscard]] bool next_entry(){
+            struct addrinfo *m_next = m_curr->ai_next;
+            if( m_next == nullptr ){
+                return false;
+            }
+            return true;
+        }   
+    };
+
     struct addrinfo *m_head = nullptr;
 
     void resolve(std::string const &name, std::string const &service){
         int err = getaddrinfo(name.c_str(),service.c_str(),NULL,&m_head);
         if ( err != 0 ) {
             fmt::println("getdaarinfo:{}{}",gai_strerror(err),err);
-            throw;
+            auto ec = std::error_code(err, gai_category());
+            throw std::system_error(ec, name + ":" + service);
         }
     }
 
@@ -378,60 +394,71 @@ struct response_writer{
 };
 
 std::vector<std::thread> pool;
-
-int main() {
-    //setlocale(LC_ALL,"zh_CN.UTF-8");
-
+void server(){
     address_resolver my_resolver;
-    my_resolver.resolve("127.0.0.1","9080");
-    fmt::println("正在监听 127.0.0.1：9080");
+    my_resolver.resolve("1270.0.0.1","8080");
+    fmt::println("正在监听 127.0.0.1：8080");
     auto first_entry = my_resolver.get_first_entry();
 
     int listenfd = first_entry.creat_and_bind_socket();
     CHECK_CALL(listen,listenfd,SOMAXCONN);
     while (true) {
-        socket_address_storage client_addr;
+        address_resolver::socket_address_storage client_addr;
         int connid = CHECK_CALL(accept, listenfd, &client_addr.m_addr, &client_addr.m_addrlen);
         fmt::println("接受了一个连接：{}",connid);
         pool.push_back(std::thread ( [connid] {
-        
-            char buf[1024];            
-            http_request_parser request_parser;
-            do{
-                ssize_t n = CHECK_CALL(read, connid, buf, sizeof(buf));
-                request_parser.push_chunks(std::string_view(buf,n));
-            }while ( !request_parser.request_finished() );
-            fmt::println("收到请求：{}",connid);
-            // fmt::println("收到请求:{}",request_parser.headers_raw());
-            // fmt::println("收到请求正文:{}",request_parser.body());
-            std::string &body = request_parser.body();
+            while(true){
+                char buf[1024];            
+                http_request_parser request_parser;
+                do{
+                    ssize_t n = CHECK_CALL(read, connid, buf, sizeof(buf));
+                    if(n == 0){
+                        fmt::println("收到对面关闭了连接：{}",connid);
+                        goto quit;
+                    }
+                    request_parser.push_chunks(std::string_view(buf,n));
+                }while ( !request_parser.request_finished() );
+                fmt::println("收到请求：{}",connid);
+                // fmt::println("收到请求:{}",request_parser.headers_raw());
+                // fmt::println("收到请求正文:{}",request_parser.body());
+                std::string &body = request_parser.body();
 
-            if( body.size() == 0 ){
-                fmt::println("你好，你的请求正文为空");
-            }else{
-                fmt::println("你好，你的请求是：[{}],共{}字节", body, body.size());
+                // if( body.size() == 0 ){
+                //     fmt::println("你好，你的请求正文为空");
+                // }else{
+                //     fmt::println("你好，你的请求是：[{}],共{}字节", body, body.size());
+                // }
+
+                response_writer res_writer;
+                res_writer.begin_header(200);
+                res_writer.write_header("Server","co_http");
+                res_writer.write_header("Content-type","text/html;charset=utf-8");
+                res_writer.write_header("Connection","keep-alive");
+                res_writer.write_header("Content-length",std::to_string(body.size()));
+                res_writer.end_header();
+                auto &res = res_writer.buffer();
+                //std::string res = "HTTP/1.1 200 OK\r\nServer: co_http\r\nConnection: close\r\nContent-length: "+ std::to_string(request_parser._extract_content_length()) +"\r\n\r\n" + body;
+                CHECK_CALL(write,connid,res.data(),res.size());
+                CHECK_CALL(write,connid,body.data(),body.size());
+
+                // fmt::println("我的响应头:{}", res);
+                // fmt::println("我的响应正文:{}", body);
+                fmt::println("正在响应{}",connid);
             }
-
-            body = body + "给正文加点料";
-
-            response_writer res_writer;
-            res_writer.begin_header(200);
-            res_writer.write_header("Server","co_http");
-            res_writer.write_header("Content-type","text/html;charset=utf-8");
-            res_writer.write_header("Connection","colse");
-            res_writer.write_header("Content-length",std::to_string(body.size()));
-            res_writer.end_header();
-            auto &res = res_writer.buffer();
-            //std::string res = "HTTP/1.1 200 OK\r\nServer: co_http\r\nConnection: close\r\nContent-length: "+ std::to_string(request_parser._extract_content_length()) +"\r\n\r\n" + body;
-            CHECK_CALL(write,connid,res.data(),res.size());
-            CHECK_CALL(write,connid,body.data(),body.size());
-
-            fmt::println("我的响应头:{}", res);
-            fmt::println("我的响应正文:{}", body);
-
+        quit:
+            fmt::println("关闭连接{}",connid);
             close(connid);
         }));
     }
+}
+
+int main() {
+    //setlocale(LC_ALL,"zh_CN.UTF-8");
+    try{
+        server();
+    }catch (std::exception &e){
+        fmt::println("错误：{}",e.what());
+    }  
 
     for(auto &t: pool){
         t.join();
