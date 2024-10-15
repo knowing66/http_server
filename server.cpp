@@ -20,15 +20,15 @@ std::error_category &gai_category(){
         std::string message(int err) const override {
             return gai_strerror(err);
         }
-    }instance;
+    } instance;
     return instance;
 }
 
 template<int Expect = 0,class T>
 T check_error(const char *msg, T res){
-    if(res == -1){
-        if noexcept (Expect != 0) {
-            if(errno = Expect){
+    if (res == -1) {
+        if constexpr (Expect != 0) {
+            if(errno == Expect){
                 return -1;
             }
         }
@@ -39,9 +39,9 @@ T check_error(const char *msg, T res){
     return res;
 }
 
-#define SOURCE_INFO_IMPL(file,line) "In"file":"#line":"
+#define SOURCE_INFO_IMPL(file,line) "In " file ":" #line ": "
 #define SOURCE_INFO() SOURCE_INFO_IMPL(__FILE__,__LINE__)
-#define CHECK_CALL_EXCEPT(expect,func,...) check_error<expect>(SOURCE_INFO()#func,__VA_ARGS__)
+#define CHECK_CALL_EXCEPT(expect, func, ...) check_error<expect>(SOURCE_INFO() #func,func(__VA_ARGS__))
 #define CHECK_CALL(func, ...) check_error(#func,func(__VA_ARGS__))
 
 struct address_resolver{
@@ -121,6 +121,182 @@ struct address_resolver{
 };
 
 using StringMap = std::map<std::string,std::string>;
+
+struct bytes_const_view {
+    char const *m_data;
+    size_t m_size;
+
+    char const *data() const noexcept {
+        return m_data;
+    }
+
+    size_t size() const noexcept {
+        return m_size;
+    }
+
+    char const *begin() const noexcept {
+        return data();
+    }
+
+    char const *end() const noexcept {
+        return data() + size();
+    }
+
+    bytes_const_view subspan(size_t start, size_t len) const {
+        if (start > size())
+            throw std::out_of_range("bytes_const_view::subspan");
+        if (len > size() - start)
+            len = size() - start;
+        return {data() + start, len};
+    }
+
+    operator std::string_view() const noexcept {
+        return std::string_view{data(), size()};
+    }
+};
+
+struct bytes_view {
+    char *m_data;
+    size_t m_size;
+
+    char *data() const noexcept {
+        return m_data;
+    }
+
+    size_t size() const noexcept {
+        return m_size;
+    }
+
+    char *begin() const noexcept {
+        return data();
+    }
+
+    char *end() const noexcept {
+        return data() + size();
+    }
+
+    bytes_view subspan(size_t start, size_t len) const {
+        if (start > size())
+            throw std::out_of_range("bytes_view::subspan");
+        if (len > size() - start)
+            len = size() - start;
+        return {data() + start, len};
+    }
+
+    operator bytes_const_view() const noexcept {
+        return bytes_const_view{data(), size()};
+    }
+
+    operator std::string_view() const noexcept {
+        return std::string_view{data(), size()};
+    }
+};
+
+struct bytes_buffer {
+    std::vector<char> m_data;
+
+    bytes_buffer() = default;
+
+    explicit bytes_buffer(size_t n) : m_data(n) {}
+
+    char const *data() const noexcept {
+        return m_data.data();
+    }
+
+    char *data() noexcept {
+        return m_data.data();
+    }
+
+    size_t size() const noexcept {
+        return m_data.size();
+    }
+
+    char const *begin() const noexcept {
+        return data();
+    }
+
+    char *begin() noexcept {
+        return data();
+    }
+
+    char const *end() const noexcept {
+        return data() + size();
+    }
+
+    char *end() noexcept {
+        return data() + size();
+    }
+
+    bytes_const_view subspan(size_t start, size_t len) const {
+        return operator bytes_const_view().subspan(start, len);
+    }
+
+    bytes_view subspan(size_t start, size_t len) {
+        return operator bytes_view().subspan(start, len);
+    }
+
+    operator bytes_const_view() const noexcept {
+        return bytes_const_view{m_data.data(), m_data.size()};
+    }
+
+    operator bytes_view() noexcept {
+        return bytes_view{m_data.data(), m_data.size()};
+    }
+
+    operator std::string_view() const noexcept {
+        return std::string_view{m_data.data(), m_data.size()};
+    }
+
+    void append(bytes_const_view chunk) {
+        m_data.insert(m_data.end(), chunk.begin(), chunk.end());
+    }
+
+    void append(std::string_view chunk) {
+        m_data.insert(m_data.end(), chunk.begin(), chunk.end());
+    }
+
+    template <size_t N>
+    void append_literial(const char (&literial)[N]) {
+        append(std::string_view{literial, N - 1});
+    }
+
+    void resize(size_t n) {
+        m_data.resize(n);
+    }
+
+    void reserve(size_t n) {
+        m_data.reserve(n);
+    }
+};
+
+template <size_t N>
+struct static_bytes_buffer {
+    std::array<char, N> m_data;
+
+    char const *data() const noexcept {
+        return m_data.data();
+    }
+
+    char *data() noexcept {
+        return m_data.data();
+    }
+
+    static constexpr size_t size() noexcept {
+        return N;
+    }
+
+    operator bytes_const_view() const noexcept {
+        return bytes_const_view{m_data.data(), N};
+    }
+
+    operator bytes_view() noexcept {
+        return bytes_view{m_data.data(), N};
+    }
+
+    operator std::string_view() const noexcept {
+        return std::string_view{m_data.data(), m_data.size()};
+    }
+};
 
 struct http11_header_parser{
     std::string m_header;
@@ -394,9 +570,122 @@ struct response_writer{
 };
 
 std::vector<std::thread> pool;
+
+template <class ...Args>
+using callback = std::function<void(Args...)>;
+
+struct async_file {
+    int m_fd;
+
+    static async_file async_wrap(int fd){
+        int flags = CHECK_CALL(fcntl,fd,F_GETFL);
+        flags |= O_NONBLOCK;
+        CHECK_CALL(fcntl,fd,F_SETFL,flags);
+        return async_file{fd};
+    }
+
+    ssize_t sync_read(bytes_view buf){
+        ssize_t ret ; 
+        do {
+            ret = CHECK_CALL_EXCEPT(EAGAIN, read, m_fd, buf.data(), buf.size());
+        }while(ret == -1);
+        return ret;
+    }
+
+    void async_read(bytes_view buf, callback<ssize_t> cb){
+        ssize_t ret ; 
+        do {
+            ret = CHECK_CALL_EXCEPT(EAGAIN, read, m_fd, buf.data(), buf.size());
+        }while(ret == -1);
+        cb(ret);
+    }
+
+    ssize_t sync_write(bytes_const_view buf) {
+        return CHECK_CALL(write, m_fd, buf.data(), buf.size());
+    }
+
+    void async_write(bytes_const_view buf, callback<ssize_t> cb) {
+        ssize_t ret = CHECK_CALL(write, m_fd, buf.data(), buf.size());
+        cb(ret);
+    }
+
+};
+
+struct http_connection_handler {
+    async_file m_conn;
+    bytes_buffer m_buffer{1024};
+    http_request_parser<> m_req_parser;
+
+    void do_init(int connfd) {
+        m_conn = async_file::async_wrap(connfd);
+
+        do_read();
+    }
+
+    void do_read() {
+        fmt::println("开始读取...");
+        m_conn.async_read(m_buffer, [this](size_t n) {
+            if(n == 0) {
+                fmt::println("收到对面关闭了连接");
+                do_close();
+                return;
+            }
+
+            fmt::println("收到了{}个字节:{}", n, m_buffer.data());
+            m_req_parser.push_chunks(m_buffer.subspan(0,n));
+
+            if( !m_req_parser.request_finished() ) {
+                do_read();
+            } else {
+                do_write();
+            }
+        });
+    }
+
+    void do_write() {
+
+        fmt::println("收到请求：{}",m_conn.m_fd);
+        // fmt::println("收到请求:{}",request_parser.headers_raw());
+        // fmt::println("收到请求正文:{}",request_parser.body());
+        std::string &body = m_req_parser.body();
+
+        // if( body.size() == 0 ){
+        //     fmt::println("你好，你的请求正文为空");
+        // }else{
+        //     fmt::println("你好，你的请求是：[{}],共{}字节", body, body.size());
+        // }
+
+        response_writer res_writer;
+        res_writer.begin_header(200);
+        res_writer.write_header("Server","co_http");
+        res_writer.write_header("Content-type","text/html;charset=utf-8");
+        res_writer.write_header("Connection","keep-alive");
+        res_writer.write_header("Content-length",std::to_string(body.size()));
+        res_writer.end_header();
+        auto &res = res_writer.buffer();
+        //std::string res = "HTTP/1.1 200 OK\r\nServer: co_http\r\nConnection: close\r\nContent-length: "+ std::to_string(request_parser._extract_content_length()) +"\r\n\r\n" + body;
+        // CHECK_CALL(write,m_conn.m_fd,res.data(),res.size());
+        // CHECK_CALL(write,m_conn.m_fd,body.data(),body.size());
+
+        m_conn.sync_write(bytes_const_view{res.data(),res.size()});
+        m_conn.sync_write(bytes_const_view{body.data(),body.size()});
+
+        // fmt::println("我的响应头:{}", res);
+        // fmt::println("我的响应正文:{}", body);
+        fmt::println("正在响应{}",m_conn.m_fd);
+
+        do_read();
+    }
+
+    void do_close() {
+        close(m_conn.m_fd);
+    }
+
+};
+
 void server(){
     address_resolver my_resolver;
-    my_resolver.resolve("1270.0.0.1","8080");
+    my_resolver.resolve("127.0.0.1","8080");
     fmt::println("正在监听 127.0.0.1：8080");
     auto first_entry = my_resolver.get_first_entry();
 
@@ -406,17 +695,23 @@ void server(){
         address_resolver::socket_address_storage client_addr;
         int connid = CHECK_CALL(accept, listenfd, &client_addr.m_addr, &client_addr.m_addrlen);
         fmt::println("接受了一个连接：{}",connid);
+
+        http_connection_handler conn_handler;
+        conn_handler.do_init(connid);
+
         pool.push_back(std::thread ( [connid] {
             while(true){
-                char buf[1024];            
+                auto conn = async_file::async_wrap(connid);
+                bytes_buffer buf(1024);            
                 http_request_parser request_parser;
                 do{
-                    ssize_t n = CHECK_CALL(read, connid, buf, sizeof(buf));
+                    ssize_t n = conn.sync_read(buf);
                     if(n == 0){
                         fmt::println("收到对面关闭了连接：{}",connid);
                         goto quit;
                     }
-                    request_parser.push_chunks(std::string_view(buf,n));
+                    request_parser.push_chunks(buf.subspan(0,n));
+
                 }while ( !request_parser.request_finished() );
                 fmt::println("收到请求：{}",connid);
                 // fmt::println("收到请求:{}",request_parser.headers_raw());
@@ -454,6 +749,7 @@ void server(){
 
 int main() {
     //setlocale(LC_ALL,"zh_CN.UTF-8");
+
     try{
         server();
     }catch (std::exception &e){
